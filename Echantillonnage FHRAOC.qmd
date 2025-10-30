@@ -1,0 +1,463 @@
+---
+title: "Echantillonnage à 3 degrés (FHRAOC)"
+author: Antsa Rajaonah
+format:
+ html:
+    self-contained: true
+    code-fold: true
+    toc: false
+    math: katex
+---
+
+# 1. Déterminer la taille de l’échantillon
+
+Dans un premier temps, on détermine la taille de l’échantillon initial ($n_0$) en fixant un niveau de précision ($E$) pour un sondage aléatoire simple.  
+Un ajustement sera ensuite appliqué pour tenir compte de la taille finie de la population de bénéficiaires $N$.
+
+$$
+n_0 = \frac{ \chi^2_{(cl,\,1)} \, N \, p (1 - p) }{ E^2 (N - 1) + \chi^2_{(cl,\,1)} \, p (1 - p) }
+$$
+
+où :
+
+- $n_0$ : taille d’échantillon initiale  
+- $\chi^2_{(cl,\,1)}$ : valeur du khi-deux avec 1 degré de liberté au niveau de confiance $cl$  
+- $N$ : taille totale de la population  
+- $p$ : proportion estimée dans la population (on prend $p = 0{,}5$ pour le cas le plus conservateur)  
+- $E$ : marge d’erreur tolérée (ex. $E = 0{,}1$ pour 10 %)  
+- $cl$ : niveau de confiance (ex. $cl = 0{,}90$ pour un intervalle de confiance à 90 %)
+
+
+Ensuite, on corrige la taille d’échantillon $n_0$ pour tenir compte de l’**effet de grappe** ($DEFF$) induit par le plan d’échantillonnage à trois degrés.  
+On obtient ainsi la taille d’échantillon finale minimale ($n$), garantissant la représentativité des données pour un niveau de confiance de 90 % et une marge d’erreur de 10 % :
+
+$$
+n = n_0 \times DEFF
+$$
+
+avec :
+
+$$
+DEFF = 1 + (m_1 - 1)\rho_1 + (m_1 m_2 - 1)\rho_2
+$$
+
+où :
+
+- $\rho_1$ : coefficient intra-grappe au niveau des unités primaires d’échantillonnage (PSU)  
+- $\rho_2$ : coefficient intra-grappe au niveau des unités secondaires d’échantillonnage (SSU)  
+- $m_1$ : taille moyenne des PSU  
+- $m_2$ : taille moyenne des SSU
+
+La fonction utilisé pour calculer cette taille d'échantillon est la suivante :
+
+```{r}
+Ssize_with_deff<-function (
+  N,
+  cl=0.90,
+  p=0.5,
+  E=0.1,
+  rho1=0,
+  rho2=0,
+  m1=NULL,
+  m2=NULL
+) {
+  n0 <- (qchisq(cl,1)*N*p*(1-p)) / (E^2*(N-1)+qchisq(cl,1)*p*(1-p))
+  n1 <- n0*(1+(m1-1)*rho1+((m1*m2-1)*rho2))
+  return(n1)
+}
+```
+
+Afin de tenir compte de la stratification et des non-réponses, la fonction a été révisée pour intégrer la variable de stratification et une marge technique (`buffer`).
+```{r}
+create_targets<-function(sframe,strata_id, pop_numbers, buffer,
+                          cl=0.95,
+                          p=0.5,
+                          E=0.05,
+                          rho1=0,
+                          rho2=0,
+                          m1=0,
+                          m2=0){
+  sframe |> 
+    dplyr::group_by({{strata_id}}) |> 
+    dplyr::summarise(
+      population = sum({{pop_numbers}},na.rm=T)
+    ) |> 
+    dplyr::mutate(
+      target = 
+        ceiling(Ssize_with_deff(population,cl=cl,p=p,E=E,rho1=rho1,rho2=rho2,m1=m1,m2=m2))
+       |> as.numeric(),
+      target.with.buffer = 
+        as.numeric(ceiling(target * (1+buffer)))
+    ) |> 
+    dplyr::rename(strata_id={{strata_id}})
+}
+```
+
+## Application
+Dans notre base de sondage, les unités primaires d’échantillonnage (**PSU**) correspondent aux **partenaires**,  
+les unités secondaires (**SSU**) aux **projets financés par le FHRAOC**,  
+et les unités finales d’échantillonnage aux **ménages bénéficiaires**.
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(reactable)
+dummy_sf <-read_excel("data/dummy2.xlsx")
+
+reactable(dummy_sf,
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+
+unit_size<-200 # nombre de menages à tirer sur le plan theorique
+ssu_size <-2
+
+```
+
+La taille moyenne théorique d’un SSU est fixée à **`r unit_size`** ménages par projet.
+Nous reformations ensuite la base de sondage et éliminons tous les SSU dont la taille est inférieure à ce seuil.
+
+```{r, message=FALSE, warning=FALSE}
+
+format_sampling_frame_3srs<-function(sframe,strata=NULL,col_psu,col_ssu,col_pop){
+  sframe$id_sampl<-paste0("id_",rownames(sframe))
+  if(is.null(strata)){
+    sframe$strata_id <- "all"
+  } else {
+    sframe$strata_id <- sframe[[strata]]
+  }
+    sframe$psu_id <- sframe[[col_psu]]
+    sframe$ssu_id <- sframe[[col_ssu]]
+
+  sframe$pop_numbers <- sframe[[col_pop]]
+  sframe<- sframe |> dplyr::select(id_sampl,strata_id,psu_id,ssu_id,pop_numbers)
+
+  return(sframe)
+}
+
+dummy_sframe <- format_sampling_frame_3srs(
+  sframe=dummy_sf,
+  strata="country",
+  col_psu="partner",
+  col_ssu="project",
+  col_pop="hh_beneficiaries"
+)|> 
+  filter(pop_numbers>=unit_size) # garder les ssu avec au minimum la taille des unités à tirer
+
+reactable(dummy_sframe,
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+
+
+```
+
+Nous appliquons ensuite la fonction `create_targets()` avec les paramètres suivants :
+
+
+$buffer$ = 0.1, $cl$ = 0.90, $p$ = 0.5, $E$ = 0.10, $rho1$ = 0.02, $rho2$ = 0.04, $m1$ =`r ssu_size`, $m2$ = `r unit_size`.
+
+
+Cela permet d’estimer la taille d’échantillon finale $n$, représentée par la variable `target.with.buffer`.
+
+```{r, message=FALSE, warning=FALSE}
+sampling_target <- create_targets(
+  dummy_sframe,
+  strata_id = strata_id,         
+  pop_numbers = pop_numbers, 
+  buffer = 0.1,  
+  cl = 0.90,
+  p = 0.5,
+  E = 0.10,
+  rho1 = 0.02, ##faible ressemblance des beneficiaires entre les projets
+  rho2 = 0.04,
+  m1 = ssu_size,
+  m2 = unit_size
+)
+
+reactable(sampling_target,
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+
+```
+
+# 2. Réaliser le tirage du plan d'échantillonnage à trois degrés
+
+On choisit le **pays** comme variable de stratification.
+
+## Etape 1: Tirage aléatoire simple des PSU (partenaires)
+
+Pour chaque pays, on effectue un tirage aléatoire simple de **p partenaires** parmi les **P partenaires** disponibles dans la strate.  
+On commence par créer la liste des **unités primaires d’échantillonnage (PSU)** pour chaque strate.  
+
+La taille théorique de chaque PSU ($m_0$) est calculée à partir du rapport suivant :
+
+$$
+m_0 = \frac{n}{m_2 \times m_1}
+$$
+
+où :  
+- $n$ : taille d’échantillon finale par strate,  
+- $m_1$ : nombre moyen de PSU à tirer,  
+- $m_2$ : nombre moyen d’unités secondaires (SSU) par PSU.
+
+```{r, message=FALSE, warning=FALSE}
+theorical_size <- sampling_target |> 
+  mutate(
+    unit_size=unit_size,
+    ssu_size=ssu_size,
+    psu_size=ceiling(target/(ssu_size*unit_size))
+  )
+
+psu_list <- dummy_sframe |> 
+  distinct(strata_id, psu_id)
+
+# Liste des PSU par strate
+psu_list <- psu_list |> 
+  left_join(theorical_size |> select(strata_id, psu_size), by = "strata_id")
+
+# Aperçu
+
+reactable(psu_list[c("strata_id","psu_id")], # partenaires,
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+
+reactable(psu_list[c("strata_id","psu_size")] |> distinct(), # taille des PSU
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+```
+
+Avec les tailles des PSU pour chaque strate, on calcule la probabilité d’inclusion de chaque PSU dans l’échantillon : $\pi_1=\frac{p}{P}$ où $p$ est le nombre de PSU tirés et $P$ le nombre total de PSU dans la strate.
+
+
+On effectue ensuite le tirage aléatoire des PSU pour chaque strate.
+```{r, message=FALSE, warning=FALSE}
+psu_sample <- psu_list |> 
+  group_by(strata_id) |> 
+  mutate(proba_selection_psu = psu_size / n()) |> 
+  summarise(
+    psu_id = sample(psu_id, size = min(first(psu_size), n()), replace = F),
+    proba_selection_psu = first(proba_selection_psu)
+  )
+  
+reactable(psu_sample, # taille des PSU
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+```
+
+## Etape 2: Tirage aléatoire des SSU (projets) proportionnellement au nombre de bénéficiaires
+
+On constitue la liste des **unités secondaires d’échantillonnage (SSU)** à partir des **PSU tirés** à l'étape 1.  
+Pour chaque SSU, on calcule la **probabilité d’inclusion conditionnelle** dans l’échantillon, notée $\pi_{2|1}$.
+
+Cette probabilité est donnée par :
+
+$$
+\pi_{2|1} = m_1 \times \frac{N_j}{\sum_j N_j}
+$$
+
+où :  
+- $m_1$ : nombre moyen de SSU à tirer par PSU,  
+- $N_j$ : taille du SSU $j$ (Nombre total de bénéficiaires),  
+- $\sum_j N_j$ : somme des tailles de tous les SSU dans la PSU concernée.
+
+```{r, message=FALSE, warning=FALSE}
+ssu_list <- dummy_sframe |> 
+  group_by(strata_id, psu_id,ssu_id) |>
+  summarise(
+    ssu_pop_numbers=sum(pop_numbers,na.rm = T)
+  )
+
+ # garder seulement les psu_id par strata_id dans psu_sample_id 
+ssu_list <- ssu_list |> 
+  semi_join(psu_sample, by = c("strata_id", "psu_id")) |> 
+  left_join(theorical_size |> select(strata_id, ssu_size), by = "strata_id")
+
+ssu_list_to_sample <- ssu_list |> 
+  group_by(strata_id, psu_id) |> 
+  mutate(
+    proba_selection_ssu = pmin(1, ssu_size * (ssu_pop_numbers / sum(ssu_pop_numbers, na.rm = TRUE))) # si ssu_size est plus grand que le nombre total de SSU disponibles dans PSU, on met la probabilité égale à 1 (tous les ssu sont tirés)
+  ) |> 
+  ungroup()
+
+# Aperçu
+
+reactable(ssu_list_to_sample[c("strata_id","psu_id","ssu_id","ssu_pop_numbers","proba_selection_ssu")],
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+
+reactable(theorical_size[c("strata_id","ssu_size")] |> distinct(), # taille des SSU à tirer dans chaque PSU
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+```
+
+On effectue le tirage aléatoire de $m_1$ SSU pour chaque PSU à partir des probabilités d'inclusion $\pi_{2|1}$.
+
+```{r, message=FALSE, warning=FALSE}
+ssu_sample <- ssu_list_to_sample |> 
+  group_by(strata_id,psu_id) |> 
+  summarise(
+    ssu_id=sample(
+      ssu_id,
+      size=min(first(ssu_size),length(ssu_id)),
+      prob = proba_selection_ssu,
+      replace=F
+    )
+  )
+
+ssu_sample <-ssu_sample |> 
+  left_join(ssu_list_to_sample |> select(strata_id, psu_id,ssu_id,ssu_pop_numbers,proba_selection_ssu),by=c("strata_id","psu_id","ssu_id"))
+
+
+reactable(ssu_sample,
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+```
+
+### Distribuer le nombre d'enquetes à réaliser proportionnellement à la taille des SSU
+On répartit le **nombre d’enquêtes objectif** ($n$) entre les SSU en fonction du **nombre de bénéficiaires** présents dans chaque SSU.  
+Pour chaque SSU $i$ de la PSU $j$, le nombre d’enquêtes attribué est calculé comme suit :
+
+$$
+n_{i,j} = n \times \frac{N_{i,j}}{N}
+$$
+
+où :  
+- $n$ : taille d’échantillon totale à répartir pour la PSU,  
+- $N_{i,j}$ : nombre de bénéficiaires dans le SSU $i$ de la PSU $j$,  
+- $N = \sum_{ij} N_{i,j}$ : nombre total de bénéficiaires.
+
+```{r, message=FALSE, warning=FALSE}
+ssu_sample <- ssu_sample |> 
+  left_join(theorical_size |> select(strata_id, target.with.buffer), by = "strata_id") |>
+  ungroup()
+
+ssu_sample <- ssu_sample |> 
+  group_by(strata_id) |> 
+  mutate(
+    survey_raw = target.with.buffer * (ssu_pop_numbers / sum(ssu_pop_numbers)),
+    survey =  pmax(1, round(survey_raw)) # s'assurer qu il y au moins une enquete à faire dans chaque SSU
+  )|> 
+  ungroup()
+```
+
+On procède ensuite à des **ajustements pour garantir que la somme des enquêtes à réaliser corresponde exactement au nombre d’enquêtes objectif** pour chaque strate.  
+L’idée est de corriger les différences éventuelles entre le nombre d’enquêtes alloué aux SSU et le **target** théorique, en répartissant ou retirant une enquête de manière aléatoire jusqu’à ce que la somme corresponde parfaitement.
+
+```{r, message=FALSE, warning=FALSE}
+strata_list <- as.character(unique(ssu_sample$strata_id))
+
+ssu_sample_table <- split(ssu_sample, ssu_sample$strata_id)
+
+for (strat in strata_list) {
+  
+  ssu_sample_treat <- ssu_sample_table[[strat]]
+  
+  diff <- sum(ssu_sample_treat$survey) - first(ssu_sample_treat$target.with.buffer)
+  
+  # ajustement jusqu’à ce que la somme corresponde au target
+  while (diff != 0) {
+    idx <- sample(1:nrow(ssu_sample_treat), abs(diff), replace = TRUE)
+    ssu_sample_treat$survey[idx] <- ssu_sample_treat$survey[idx] - sign(diff)
+    
+    diff <- sum(ssu_sample_treat$survey) - first(ssu_sample_treat$target.with.buffer)
+  }
+  
+  # nettoyage
+  ssu_sample_treat <- ssu_sample_treat %>% 
+    select(-c(survey_raw, target.with.buffer, diff), everything())
+  
+  # on remet le tableau ajusté dans la liste
+  ssu_sample_table[[strat]] <- ssu_sample_treat
+}
+
+ssu_sample <- bind_rows(ssu_sample_table) |> 
+  select(-c(survey_raw, target.with.buffer, diff))
+
+reactable(ssu_sample,
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+```
+
+On procède maintenant à la **préparation finale de l’échantillon** en combinant les PSU, les SSU et les unités finales, et en calculant les **probabilités d’inclusion pour chaque unité finale**.
+
+```{r, message=FALSE, warning=FALSE}
+unit_prob <- ssu_sample |>
+  mutate(
+    proba_selection_unit=unit_size/ssu_pop_numbers
+  )
+# Ici :
+# - unit_size : nombre de ménages à tirer dans chaque SSU
+# - ssu_pop_numbers : nombre total de ménages dans le SSU
+# proba_selection_unit : probabilité de sélection d’un ménage donné dans le SSU
+
+sample_final <- ssu_sample |> 
+  left_join(psu_sample,by=c("strata_id","psu_id")) # Cette jointure permet d’associer chaque SSU à son PSU tiré à l’étape 1
+
+sample_final <- sample_final |> 
+  left_join(unit_prob |> select(strata_id,psu_id,ssu_id,proba_selection_unit),by=c("strata_id","psu_id","ssu_id")) # On ajoute pour chaque SSU la probabilité d’inclusion de ses unités finales (ménages)
+
+# Calcul de la probabilité d’inclusion globale pour chaque ménage
+sample_final <- sample_final |>
+  ungroup() |> 
+  relocate(c(survey,ssu_pop_numbers,proba_selection_psu,proba_selection_ssu,proba_selection_unit),.after = ssu_id) |> 
+  mutate(
+    proba_selection=proba_selection_psu*proba_selection_ssu*proba_selection_unit
+  )
+  # sample_final contient donc :
+# - toutes les informations sur les strates, PSU, SSU et unités finales
+# - le nombre de ménages tirés dans chaque SSU
+# - et les probabilités d’inclusion complètes pour chaque unité finale
+
+
+reactable(sample_final,
+  searchable = TRUE, 
+  sortable   = TRUE, 
+  pagination = TRUE, 
+  defaultPageSize = 10
+)
+```
+
+## Etape 3: Tirage aléatoire simple des unités finales à enquêter (bénéficiaires)
+
+À partir de l'étape 2, nous constituons la **liste des bénéficiaires** des projets sélectionnés.  
+Pour chaque projet, les bénéficiaires sont **tirés aléatoirement** en respectant le **nombre d’enquêtes défini à l’étape précédente**.  
+
+La **probabilité d’inclusion** de chaque bénéficiaire correspond à `proba_selection_unit`, calculée à l’étape 2 :
+
+$$
+\pi_{3|2} = \frac{m_2}{N_{j}}
+$$
+
+où :  
+
+- $\pi_{3|2}$ : probabilité de sélection d’un bénéficiaire dans le SSU
+- $m_2$: nombre moyen de bénéficiaires par PSU
+- $N_j$ : nombre total de bénéficiaires dans le projet j.
