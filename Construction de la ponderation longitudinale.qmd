@@ -1,0 +1,381 @@
+---
+title: "Construction du poids d'échantillonnage du panel longitudinal (FHRAOC)"
+author: Antsa Rajaonah, ISE
+format:
+ html:
+    self-contained: true
+    code-fold: true
+    toc: false
+    math: katex
+---
+
+```{r how_data, echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(reactable)
+library(htmltools)
+
+rm(list=ls())
+dummy_bl <- read_excel("data/baseline_data.xlsx")
+dummy_el <- read_excel("data/endline_data.xlsx")
+
+tagList(
+  h3("Echantillon du baseline"),
+  reactable(
+    dummy_bl,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  ),
+  h3("Echantillon du endline"),
+  reactable(
+    dummy_el,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+)
+```
+
+# 1. Déterminer les ménages présents à la fois dans l'échantillon initial (s0) et final (s1) et calculer le taux d'attrition
+
+On calcule un indicateur `response_indicator` ($\mathbf{1}_{\{i\in s_1\}}$) dans l'échantillon initial. Cette variable vaut 1 si le ménage est présent à la fois dans l'échantillon initial et final, et 0 sinon.
+
+```{r construct_resp_ind, echo=TRUE, message=FALSE, warning=FALSE}
+
+dummy_el <- dummy_el |> 
+  mutate(
+    uuid_final=ifelse(
+      backup=="Non",
+      uuid,
+      uuid_backup
+    )
+  )
+
+uuid_endline <- dummy_el$uuid_final
+
+data_resp_predict_0 <- dummy_bl %>%
+  mutate(
+    response_indicator = if_else(
+      uuid %in% uuid_endline,
+      1,
+      0
+    )
+  )
+
+data_resp_predict_1 <- dummy_el %>%
+  mutate(
+    response_indicator = if_else(
+      backup=="Non",
+      1,
+      0
+    )
+  )
+
+```
+Le taux d'attrition est calculé comme suit:
+$$
+AR_1= 1
+- \frac{ \sum_{i} \mathbf{1}\{ i \in s_1 \} }
+         { \sum_{i} \mathbf{1}\{ i \in s_0 \} }
+$$
+
+```{r attrition_calcul, echo=TRUE, message=FALSE, warning=FALSE}
+
+attrition_table <- data_resp_predict_0 %>%
+  summarise(
+    baseline_sample_size = n(),
+    respondents_endline = sum(response_indicator),
+    response_rate = respondents_endline / baseline_sample_size,
+    attrition_rate = 1 - response_rate
+  )
+
+ tagList(
+  h3("Pourcentage de répondants restants dans le panel du baseline à l'endline"),
+  reactable(
+    attrition_table,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+) 
+```
+
+# 2. Construire le modèle prédictif de l'attrition
+
+Pour cette étude, nous supposons que l’attrition suit un mécanisme de données manquantes aléatoires (**MAR**). Cette hypothèse permet de mettre en place une stratégie d’ajustement des pondérations pour non-réponse et de calibration afin de réduire l’impact de l’attrition sur les estimations.
+
+
+Un mécanisme est dit MAR lorsque **la probabilité de perdre un répondant dépend uniquement des données observées**, et non des données non observées. Autrement dit, une donnée peut être manquante en raison de certaines caractéristiques connues de l'individu. Par exemple, si les jeunes chefs de femmes sont plus susceptibles de ne pas répondre, alors la probabilité de non-réponse dépend de l’âge et du sexe du chef de ménage, deux variables mesurées pour tous les ménages.
+
+## Chercher les variables (caractéristiques) prédictives de l'attrition
+Nous utilisons une régression logistique pour modéliser la probabilité de réponse à toutes les vagues de collecte en fonction des caractéristiques observées au moment de la collecte initiale (s0).
+
+```{r logistic_regression, echo=TRUE, message=FALSE, warning=FALSE}
+# Modèle de régression logistique
+logistic_model <- glm(
+  response_indicator
+  ~ stratification + setting + hh_size + hoh_gender_final + hoh_age_final+
+    hoh_edu,
+  data = data_resp_predict_0,
+  family = binomial(link = "logit")
+) 
+
+# Sélection stepwise basée sur AIC
+logistic_model_step <- step(logistic_model, direction = "both")
+
+# Résumé du modèle final
+library(broom)
+tidy(logistic_model_step)
+
+```
+## Prédire les probabilités de réponse
+Nous utilisons le modèle logistique final pour prédire les probabilités de présence de chaque ménage dans les deux vagues de collecte pour chaque base.
+```{r predict_response_prob, echo=TRUE, message=FALSE, warning=FALSE}
+# Prédire les probabilités de réponse
+data_resp_predict_0 <- data_resp_predict_0 %>%
+  mutate(
+    predicted_response_prob = predict(
+      logistic_model_step,
+      type = "response"
+    )
+  )
+
+data_resp_predict_1 <- data_resp_predict_1 %>%
+  mutate(
+    predicted_response_prob = predict(
+      logistic_model_step,
+      type = "response"
+    )
+  )
+
+data_resp_predict_0 <- data_resp_predict_0 %>%
+  select(
+    uuid,
+    weights,
+    response_indicator,
+    predicted_response_prob
+  )
+
+data_resp_predict_1 <- data_resp_predict_1 %>%
+  select(
+    uuid_final,
+    weights,
+    response_indicator,
+    predicted_response_prob
+  )
+
+tagList(
+  h3("Probabilités prédites de réponse - Baseline"),
+  reactable(
+    data_resp_predict_0,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  ),
+  h3("Probabilités prédites de réponse - Endline"),
+  reactable(
+    data_resp_predict_1,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+)
+
+```
+# 3. Créer des strates basées sur les probabilités prédites de réponse
+Nous divisons l'échantillon initial en strates (5) basées sur les quantiles des probabilités prédites de réponse. Chaque strate regroupe des ménages ayant des probabilités similaires de répondre à l'enquête finale.
+```{r create_strata, echo=TRUE, message=FALSE, warning=FALSE}
+# Créer des strates basées sur les quantiles des probabilités prédites
+data_resp_predict_0 <- data_resp_predict_0 %>%
+  mutate(
+    response_strata = ntile(predicted_response_prob, 5) # 5 strates
+  ) 
+
+data_resp_predict_1 <- data_resp_predict_1 %>%
+  mutate(
+    response_strata = ntile(predicted_response_prob, 5) # 5 strates
+  ) 
+
+  reactable(
+    data_resp_predict_0,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+
+    reactable(
+    data_resp_predict_1,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+```
+# 4. Calculer les poids d'ajustement pour non-réponse
+Pour chaque strate, nous calculons le taux de réponse observé et utilisons ce taux pour ajuster les poids d'échantillonnage initiaux.
+```{r calculate_adjustment_weights, echo=TRUE, message=FALSE, warning=FALSE}
+# Calculer les taux de réponse par strate
+response_rates_0 <- data_resp_predict_0 %>%
+  group_by(response_strata) %>%
+  summarise(
+    respondents = sum(response_indicator*weights),
+    strata_size = sum(weights),
+    response_rate = respondents / strata_size
+  )
+
+response_rates_1 <- data_resp_predict_1 %>%
+  group_by(response_strata) %>%
+  summarise(
+    respondents = sum(response_indicator*weights),
+    strata_size = sum(weights),
+    response_rate = respondents / strata_size
+  )
+
+# Joindre les taux de réponse aux données
+data_resp_predict_0 <- data_resp_predict_0 %>%
+  left_join(response_rates_0, by = "response_strata") %>%
+  mutate(
+    adjustment_weight = 1 / response_rate
+  ) |> 
+    select(
+      uuid,
+      weights,
+      predicted_response_prob,
+      response_strata,
+      response_rate,
+      adjustment_weight
+    )
+
+data_resp_predict_1 <- data_resp_predict_1 %>%
+  left_join(response_rates_1, by = "response_strata") %>%
+  mutate(
+    adjustment_weight = 1 / response_rate
+  ) |> 
+    select(
+      uuid_final,
+      weights,
+      predicted_response_prob,
+      response_strata,
+      response_rate,
+      adjustment_weight
+    )
+
+  reactable(
+    data_resp_predict_0,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+
+  reactable(
+    data_resp_predict_1,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+
+```
+# 5. Calculer les poids finaux pour l'échantillon longitudinal
+Les poids finaux pour l'échantillon longitudinal sont obtenus en multipliant les poids d'échantillonnage initiaux par les poids d'ajustement pour non-réponse
+```{r calculate_final_weights, echo=TRUE, message=FALSE, warning=FALSE}
+
+data_resp_predict_0 <- data_resp_predict_0 %>%
+  select(
+    uuid,
+    weights,
+    adjustment_weight
+  ) |> 
+  mutate(
+    longitudinal_weights = weights * adjustment_weight
+  )
+
+  reactable(
+    data_resp_predict_0,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+
+data_resp_predict_1 <- data_resp_predict_1 %>%
+  select(
+    uuid_final,
+    weights,
+    adjustment_weight
+  ) |> 
+  mutate(
+    longitudinal_weights = weights * adjustment_weight
+  )
+
+  reactable(
+    data_resp_predict_1,
+    searchable = TRUE,
+    sortable = TRUE,
+    pagination = TRUE,
+    defaultPageSize = 10
+  )
+
+  data_plot_1 <- data_resp_predict_1 %>% 
+  select(weights, longitudinal_weights) %>% 
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "weight")
+
+ggplot(data_plot_1, aes(x = weight, color = type)) +
+  geom_density(size = 1) +
+  labs(
+    title = "Comparaison de la distribution des pondérations initiales et longitudinales",
+    x = "Poids",
+    y = "Densité",
+    color = "Type de poids"
+  ) +
+  theme_minimal()
+
+```
+
+# 6. Calculer l’indicateur d’efficacité de pondération DEFF
+Le $\textit{design effect}$ dû aux poids est défini par :
+$$
+DEFF_w = 1 + CV(w)^2
+$$
+
+où :
+$$
+CV(w) = \frac{sd(w)}{mean(w)}
+$$
+
+Ainsi :
+
+- si $\text{DEFF} = 1$ : les poids sont tous égaux (situation idéale) ;
+- si $\text{DEFF} = 2$ : la variance des poids double la variance des estimations ;
+- si $\text{DEFF} > 4$ : les pondérations sont problématiques (souvent dû aux poids extrêmes).
+
+
+```{r calculate_deff, echo=TRUE, message=FALSE, warning=FALSE}
+calc_deff <- function(weights) {
+  cv <- sd(weights) / mean(weights)
+  deff <- 1 + cv^2
+  return(deff)
+}
+
+deff_initial_0 <- calc_deff(data_resp_predict_0$weights)
+print(paste("DEFF initial (baseline):", round(deff_initial_0, 3)))
+
+deff_longitudinal_0 <- calc_deff(data_resp_predict_0$longitudinal_weights)
+print(paste("DEFF longitudinal (baseline):", round(deff_longitudinal_0, 3)))
+
+deff_initial_1 <- calc_deff(data_resp_predict_1$weights)
+print(paste("DEFF initial (endline):", round(deff_initial_1, 3)))
+
+deff_longitudinal_1 <- calc_deff(data_resp_predict_1$longitudinal_weights)
+print(paste("DEFF longitudinal (endline):", round(deff_longitudinal_1, 3)))
+```
