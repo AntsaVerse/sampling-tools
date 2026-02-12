@@ -1,1 +1,1 @@
-2SRS (unknown pop) --> https://antsaverse.github.io/Data-Collection-Monitoring/sampling_refugees.html
+2SRS (unknown pop) --> https://antsaverse.github.io/sampling-tools/sampling_refugees.html
